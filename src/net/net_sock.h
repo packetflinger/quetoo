@@ -31,13 +31,13 @@ const char *Net_GetErrorString(void);
 bool Net_CompareNetaddr(const net_addr_t *a, const net_addr_t *b);
 bool Net_CompareClientNetaddr(const net_addr_t *a, const net_addr_t *b);
 
-void Net_NetAddrToSockaddr(const net_addr_t *a, net_sockaddr *s);
+void Net_NetAddrToSockaddr(const net_addr_t *a, struct sockaddr_storage *s);
 const char *Net_NetaddrToString(const net_addr_t *a);
 bool Net_StringToSockaddr(const char *s, net_sockaddr *saddr);
 bool Net_StringToNetaddr(const char *s, net_addr_t *a);
 
-int32_t Net_Socket(net_addr_type_t type, const char *iface, in_port_t port);
-int32_t Net_SocketListen(const char *iface, in_port_t port, int32_t backlog);
+int32_t Net_Socket(net_addr_type_t type, const char *iface, in_port_t port, bool v6);
+int32_t Net_SocketListen(const char *iface, in_port_t port, int32_t backlog, bool v6);
 int32_t Net_Accept(int32_t sock, net_addr_t *from);
 ssize_t Net_Send(int32_t sock, const void *data, size_t len);
 ssize_t Net_Recv(int32_t sock, void *data, size_t len);

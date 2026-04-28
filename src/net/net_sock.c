@@ -67,41 +67,64 @@ const char *Net_GetErrorString(void) {
 /**
  * @brief Initializes the specified sockaddr_in according to the net_addr_t.
  */
-void Net_NetAddrToSockaddr(const net_addr_t *a, net_sockaddr *s) {
+void Net_NetAddrToSockaddr(const net_addr_t *a, struct sockaddr_storage *s) {
+
+  net_sockaddr  *s4 = (net_sockaddr  *)s;
+  net_sockaddr6 *s6 = (net_sockaddr6 *)s;
 
   memset(s, 0, sizeof(*s));
-  s->sin_family = AF_INET;
 
   if (a->type == NA_BROADCAST) {
-    *(uint32_t *) &s->sin_addr = -1;
+    s4->sin_family = AF_INET;
+    s4->sin_addr.s_addr = INADDR_BROADCAST;
+    s4->sin_port = a->port;
   } else if (a->type == NA_DATAGRAM) {
-    *(in_addr_t *) &s->sin_addr = a->addr;
+    if (a->v6) {
+      s6->sin6_family = AF_INET6;
+      s6->sin6_port = a->port;
+      s6->sin6_scope_id = a->scope;
+      memcpy(&s6->sin6_addr, &a->ip, 16);
+    } else {
+      s4->sin_family = AF_INET;
+      s4->sin_port = a->port;
+      memcpy(&s4->sin_addr, &a->ip, 4);
+    }
   }
-
-  s->sin_port = a->port;
 }
 
 /**
  * @return True if the addresses share the same base and port.
  */
 bool Net_CompareNetaddr(const net_addr_t *a, const net_addr_t *b) {
-  return a->addr == b->addr && a->port == b->port;
+  if (a->v6){
+    return !memcmp(a->ip.u8, b->ip.u8, 16) && a->port == b->port;
+  }
+  return a->ip.u32[0] == b->ip.u32[0] && a->port == b->port;
 }
 
 /**
  * @return True if the addresses share the same type and base.
  */
 bool Net_CompareClientNetaddr(const net_addr_t *a, const net_addr_t *b) {
-  return a->type == b->type && a->addr == b->addr;
+  if (a->v6) {
+    return !memcmp(a->ip.u8, b->ip.u8, 16) && a->type == b->type;
+  }
+  return a->type == b->type && a->ip.u32[0] == b->ip.u32[0];
 }
 
 /**
- * @brief
+ * @brief Return a string representation of the base and port
  */
 const char *Net_NetaddrToString(const net_addr_t *a) {
   static char s[64];
+  char t[INET6_ADDRSTRLEN];
 
-  g_snprintf(s, sizeof(s), "%s:%i", inet_ntoa(*(const struct in_addr *) &a->addr), ntohs(a->port));
+  if (a->v6) {
+    inet_ntop(AF_INET6, &a->ip.u8, t, INET6_ADDRSTRLEN);
+  } else {
+    inet_ntop(AF_INET, &a->ip.u8, t, INET_ADDRSTRLEN);
+  }
+  g_snprintf(s, sizeof(s), "%s:%i", t, ntohs(a->port));
 
   return s;
 }
@@ -111,11 +134,30 @@ const char *Net_NetaddrToString(const net_addr_t *a) {
  * @remarks Uses a static buffer; not reentrant.
  */
 const char *Net_NetaddrToIpString(const net_addr_t *a) {
-  static char s[INET_ADDRSTRLEN];
+  static char s[INET6_ADDRSTRLEN];
 
-  g_strlcpy(s, inet_ntoa(*(const struct in_addr *) &a->addr), sizeof(s));
+  if (a->v6) {
+    inet_ntop(AF_INET6, &a->ip.u8, s, INET6_ADDRSTRLEN);
+  } else {
+    inet_ntop(AF_INET, &a->ip.u8, s, INET_ADDRSTRLEN);
+  }
 
   return s;
+}
+
+/**
+ * @brief getaddrinfo will return multiple entries of mixed address families,
+ * find the first entry for a particular family.
+ */
+static struct addrinfo Net_SearchAddrinfo(struct addrinfo *a, int family) {
+  while (a) {
+    if (a->ai_family == family) {
+      return a;
+    }
+    a = a->ai_next;
+  }
+
+  return NULL;
 }
 
 /**
@@ -126,9 +168,12 @@ const char *Net_NetaddrToIpString(const net_addr_t *a) {
  * idnewt:28000
  * 192.246.40.70
  * 192.246.40.70:28000
+ * justaimdown.example.com
+ * [2001:db8::b00b:f4ce]:1998
  */
-bool Net_StringToSockaddr(const char *s, net_sockaddr *saddr) {
+bool Net_StringToSockaddr(const char *s, struct sockaddr_storage *saddr) {
 
+  bool preferv6 = true; // make this a cvar once everything works
   memset(saddr, 0, sizeof(*saddr));
 
   char *node = g_strdup(s);
@@ -139,39 +184,66 @@ bool Net_StringToSockaddr(const char *s, net_sockaddr *saddr) {
   }
 
   const struct addrinfo hints = {
-    .ai_family = AF_INET,
+    .ai_family = AF_UNSPEC,
     .ai_socktype = SOCK_DGRAM,
+    .ai_flags = AI_ADDRCONFIG
   };
 
-  struct addrinfo *info;
+  struct addrinfo *info, *found;
   if (getaddrinfo(node, service, &hints, &info) == 0) {
-    memcpy(saddr, info->ai_addr, sizeof(*saddr));
+    found = Net_SearchAddrinfo(info, preferv6 ? AF_INET6 : AF_INET);
+    if (!found) {
+        found = info;
+    }
+    memcpy(saddr, found->ai_addr, sizeof(*saddr));
     freeaddrinfo(info);
   }
 
   g_free(node);
 
-  return saddr->sin_addr.s_addr != 0;
+  return ((net_sockaddr *)saddr)->sin_addr.s_addr != 0;
 }
 
 /**
  * @brief Parses the hostname and port into the specified net_addr_t.
  */
 bool Net_StringToNetaddr(const char *s, net_addr_t *a) {
-  net_sockaddr saddr;
+
+  struct sockaddr_storage saddr;
 
   if (!Net_StringToSockaddr(s, &saddr)) {
     return false;
   }
 
-  a->addr = saddr.sin_addr.s_addr;
+  memset(a, 0, sizeof(net_addr_t));
+
+  const struct sockaddr_in  *s4 = (const struct sockaddr_in  *)s;
+  const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)s;
+
+  switch (saddr.ss_family) {
+  case AF_INET:
+    memcpy(a->ip, &s4->sin_addr, 4);
+    a->port = s4->sin_port;
+    a->type = NA_DATAGRAM;
+    break;
+
+  case AF_INET6:
+    if (IN6_IS_ADDR_V4MAPPED(&s6->sin6_addr)) {
+      a->v6 = false;
+      memcpy(&a->ip, &s6->sin6_addr.s6_addr[12], 4);
+    } else {
+      a->v6 = true;
+      memcpy(&a->ip, &s6->sin6_addr, 16);
+      a->scope = s6->sin6_scope_id;
+    }
+    a->port = s6->sin6_port;
+    a->type = NA_DATAGRAM;
+    break;
+  }
 
   if (g_strcmp0(s, "localhost") == 0) {
     a->port = 0;
     a->type = NA_LOOP;
-  } else {
-    a->port = saddr.sin_port;
-    a->type = NA_DATAGRAM;
   }
 
   return true;
@@ -180,13 +252,13 @@ bool Net_StringToNetaddr(const char *s, net_addr_t *a) {
 /**
  * @brief Creates and binds a new network socket for the specified protocol.
  */
-int32_t Net_Socket(net_addr_type_t type, const char *iface, in_port_t port) {
+int32_t Net_Socket(net_addr_type_t type, const char *iface, in_port_t port, int v6) {
   int32_t sock, i = 1;
 
   switch (type) {
     case NA_BROADCAST:
     case NA_DATAGRAM:
-      if ((sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
+      if ((sock = socket(v6 ? PF_INET6 : PF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
         Com_Error(ERROR_DROP, "socket: %s\n", Net_GetErrorString());
       }
 
@@ -198,7 +270,7 @@ int32_t Net_Socket(net_addr_type_t type, const char *iface, in_port_t port) {
       break;
 
     case NA_STREAM:
-      if ((sock = socket(PF_INET, SOCK_STREAM, 0)) == -1) {
+      if ((sock = socket(v6 ? PF_INET6 : PF_INET, SOCK_STREAM, 0)) == -1) {
         Com_Error(ERROR_DROP, "socket: %s\n", Net_GetErrorString());
       }
 
@@ -217,7 +289,7 @@ int32_t Net_Socket(net_addr_type_t type, const char *iface, in_port_t port) {
   if (iface) {
     Net_StringToSockaddr(iface, &addr);
   } else {
-    addr.sin_family = AF_INET;
+    addr.sin_family = v6 ? AF_INET6 : AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
   }
 
@@ -234,10 +306,10 @@ int32_t Net_Socket(net_addr_type_t type, const char *iface, in_port_t port) {
  * @brief Creates a non-blocking TCP listen socket with SO_REUSEADDR.
  * @return The socket descriptor, or -1 on failure.
  */
-int32_t Net_SocketListen(const char *iface, in_port_t port, int32_t backlog) {
+int32_t Net_SocketListen(const char *iface, in_port_t port, int32_t backlog, bool v6) {
   int32_t opt = 1;
 
-  const int32_t sock = socket(PF_INET, SOCK_STREAM, 0);
+  const int32_t sock = socket(v6 ? PF_INET6 : PF_INET, SOCK_STREAM, 0);
   if (sock == -1) {
     Com_Warn("socket: %s\n", Net_GetErrorString());
     return -1;
@@ -252,7 +324,7 @@ int32_t Net_SocketListen(const char *iface, in_port_t port, int32_t backlog) {
   if (iface) {
     Net_StringToSockaddr(iface, &addr);
   } else {
-    addr.sin_family = AF_INET;
+    addr.sin_family = v6 ? AF_INET6 : AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
   }
 

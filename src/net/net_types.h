@@ -60,18 +60,29 @@
 
 // A typedef for net_sockaddr, to reduce "struct" everywhere and silence Windows warning.
 typedef struct sockaddr_in net_sockaddr;
+typedef struct sockaddr_in6 net_sockaddr6;
 
 typedef enum {
   NA_LOOP,
   NA_BROADCAST,
   NA_DATAGRAM,
-  NA_STREAM
+  NA_STREAM,
 } net_addr_type_t;
+
+typedef union {
+  uint8_t u8[16];
+  uint16_t u16[8];
+  uint32_t u32[4];
+  uint64_t u64[2];
+} net_addr_ip_t;
 
 typedef struct {
   net_addr_type_t type;
   in_addr_t addr;
+  net_addr_ip_t ip;
   in_port_t port;
+  uint32_t scope; // link-local, site-local, global...
+  bool v6;
 } net_addr_t;
 
 typedef enum {

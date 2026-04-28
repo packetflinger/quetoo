@@ -282,12 +282,16 @@ void Net_Config(net_src_t source, bool up) {
 
     const cvar_t *net_interface = Cvar_Add("net_interface", "", CVAR_NO_SET, NULL);
     const cvar_t *net_port = Cvar_Add("net_port", va("%i", PORT_SERVER), CVAR_NO_SET, NULL);
+    const cvar_t *net_ipv6_enable = Cvar_Add("net_ipv6_enable", "1", CVAR_NO_SET, NULL);
 
     if (*sock == 0) {
       const char *iface = strlen(net_interface->string) ? net_interface->string : NULL;
       const in_port_t port = source == NS_UDP_SERVER ? net_port->integer : 0;
 
-      *sock = Net_Socket(NA_DATAGRAM, iface, port);
+      if (net_ipv6_enable->integer > 0) {
+          *sock6 = Net_Socket(NA_DATAGRAM, iface, port, true);
+      }
+      *sock = Net_Socket(NA_DATAGRAM, iface, port, false);
     }
   } else {
     if (*sock != 0) {
